@@ -74,10 +74,22 @@ from torchrl.trainers.algorithms.configs.envs_libs import (
     UnityMLAgentsEnvConfig,
     VmasEnvConfig,
 )
+from torchrl.trainers.algorithms.configs.hooks import (
+    BatchSubSamplerConfig,
+    ClearCudaCacheConfig,
+    CountFramesLogConfig,
+    EarlyStoppingConfig,
+    HookConfig,
+    LogScalarConfig,
+    LogTimingConfig,
+    RewardNormalizerConfig,
+    SelectKeysConfig,
+)
 from torchrl.trainers.algorithms.configs.logging import (
     CSVLoggerConfig,
     LoggerConfig,
     TensorboardLoggerConfig,
+    TrackioLoggerConfig,
     WandbLoggerConfig,
 )
 from torchrl.trainers.algorithms.configs.modules import (
@@ -85,23 +97,37 @@ from torchrl.trainers.algorithms.configs.modules import (
     ConvNetConfig,
     MLPConfig,
     ModelConfig,
+    QMixerNetworkConfig,
+    QValueModelConfig,
     TanhModuleConfig,
     TanhNormalModelConfig,
     TensorDictModuleConfig,
     TensorDictSequentialConfig,
     ValueModelConfig,
+    VDNMixerNetworkConfig,
 )
 from torchrl.trainers.algorithms.configs.objectives import (
+    CQLLossConfig,
+    DDPGLossConfig,
+    DQNLossConfig,
     GAEConfig,
     HardUpdateConfig,
+    IQLLossConfig,
     LossConfig,
     PPOLossConfig,
+    QMixerLossConfig,
     SACLossConfig,
     SoftUpdateConfig,
+    TD3LossConfig,
 )
 from torchrl.trainers.algorithms.configs.trainers import (
+    CQLTrainerConfig,
+    DDPGTrainerConfig,
+    DQNTrainerConfig,
+    IQLTrainerConfig,
     PPOTrainerConfig,
     SACTrainerConfig,
+    TD3TrainerConfig,
     TrainerConfig,
 )
 from torchrl.trainers.algorithms.configs.transforms import (
@@ -125,6 +151,7 @@ from torchrl.trainers.algorithms.configs.transforms import (
     DTypeCastTransformConfig,
     EndOfLifeTransformConfig,
     ExcludeTransformConfig,
+    ExpandAsConfig,
     FiniteTensorDictCheckConfig,
     FlattenObservationConfig,
     FlattenTensorDictConfig,
@@ -271,6 +298,9 @@ __all__ = [
     "TensorDictModuleConfig",
     "TensorDictSequentialConfig",
     "ValueModelConfig",
+    "QValueModelConfig",
+    "QMixerNetworkConfig",
+    "VDNMixerNetworkConfig",
     "AdditiveGaussianModuleConfig",
     # Transforms - Core
     "ActionDiscretizerConfig",
@@ -357,19 +387,41 @@ __all__ = [
     "SliceSamplerConfig",
     "SliceSamplerWithoutReplacementConfig",
     # Losses
+    "CQLLossConfig",
+    "DDPGLossConfig",
+    "DQNLossConfig",
+    "IQLLossConfig",
     "LossConfig",
     "PPOLossConfig",
+    "QMixerLossConfig",
     "SACLossConfig",
+    "TD3LossConfig",
     # Value functions
     "GAEConfig",
     # Trainers
+    "CQLTrainerConfig",
+    "DDPGTrainerConfig",
+    "DQNTrainerConfig",
+    "IQLTrainerConfig",
     "PPOTrainerConfig",
     "SACTrainerConfig",
+    "TD3TrainerConfig",
     "TrainerConfig",
+    # Hooks
+    "HookConfig",
+    "BatchSubSamplerConfig",
+    "ClearCudaCacheConfig",
+    "CountFramesLogConfig",
+    "EarlyStoppingConfig",
+    "LogScalarConfig",
+    "LogTimingConfig",
+    "RewardNormalizerConfig",
+    "SelectKeysConfig",
     # Loggers
     "CSVLoggerConfig",
     "LoggerConfig",
     "TensorboardLoggerConfig",
+    "TrackioLoggerConfig",
     "WandbLoggerConfig",
     # Weight Updaters
     "WeightUpdaterConfig",
@@ -439,6 +491,8 @@ def _register_configs():
     # Network configs
     cs.store(group="network", name="mlp", node=MLPConfig)
     cs.store(group="network", name="convnet", node=ConvNetConfig)
+    cs.store(group="network", name="qmixer", node=QMixerNetworkConfig)
+    cs.store(group="network", name="vdn_mixer", node=VDNMixerNetworkConfig)
 
     # Model configs
     cs.store(group="network", name="tensordict_module", node=TensorDictModuleConfig)
@@ -448,6 +502,7 @@ def _register_configs():
     cs.store(group="model", name="tanh_module", node=TanhModuleConfig)
     cs.store(group="model", name="tanh_normal", node=TanhNormalModelConfig)
     cs.store(group="model", name="value", node=ValueModelConfig)
+    cs.store(group="model", name="qvalue", node=QValueModelConfig)
 
     # Exploration configs
     cs.store(
@@ -463,6 +518,7 @@ def _register_configs():
     # Core transforms
     cs.store(group="transform", name="noop_reset", node=NoopResetEnvConfig)
     cs.store(group="transform", name="step_counter", node=StepCounterConfig)
+    cs.store(group="transform", name="expand_as", node=ExpandAsConfig)
     cs.store(group="transform", name="compose", node=ComposeConfig)
     cs.store(group="transform", name="double_to_float", node=DoubleToFloatConfig)
     cs.store(group="transform", name="to_tensor_image", node=ToTensorImageConfig)
@@ -553,8 +609,14 @@ def _register_configs():
     # =============================================================================
 
     cs.store(group="loss", name="base", node=LossConfig)
+    cs.store(group="loss", name="cql", node=CQLLossConfig)
+    cs.store(group="loss", name="ddpg", node=DDPGLossConfig)
+    cs.store(group="loss", name="dqn", node=DQNLossConfig)
+    cs.store(group="loss", name="iql", node=IQLLossConfig)
     cs.store(group="loss", name="ppo", node=PPOLossConfig)
+    cs.store(group="loss", name="mixer", node=QMixerLossConfig)
     cs.store(group="loss", name="sac", node=SACLossConfig)
+    cs.store(group="loss", name="td3", node=TD3LossConfig)
 
     # =============================================================================
     # Value Function Configurations
@@ -611,8 +673,26 @@ def _register_configs():
     # =============================================================================
 
     cs.store(group="trainer", name="base", node=TrainerConfig)
+    cs.store(group="trainer", name="cql", node=CQLTrainerConfig)
+    cs.store(group="trainer", name="ddpg", node=DDPGTrainerConfig)
+    cs.store(group="trainer", name="dqn", node=DQNTrainerConfig)
+    cs.store(group="trainer", name="iql", node=IQLTrainerConfig)
     cs.store(group="trainer", name="ppo", node=PPOTrainerConfig)
     cs.store(group="trainer", name="sac", node=SACTrainerConfig)
+    cs.store(group="trainer", name="td3", node=TD3TrainerConfig)
+
+    # =============================================================================
+    # Hook Configurations
+    # =============================================================================
+
+    cs.store(group="hook", name="batch_subsampler", node=BatchSubSamplerConfig)
+    cs.store(group="hook", name="clear_cuda_cache", node=ClearCudaCacheConfig)
+    cs.store(group="hook", name="count_frames_log", node=CountFramesLogConfig)
+    cs.store(group="hook", name="early_stopping", node=EarlyStoppingConfig)
+    cs.store(group="hook", name="log_scalar", node=LogScalarConfig)
+    cs.store(group="hook", name="log_timing", node=LogTimingConfig)
+    cs.store(group="hook", name="reward_normalizer", node=RewardNormalizerConfig)
+    cs.store(group="hook", name="select_keys", node=SelectKeysConfig)
 
     # =============================================================================
     # Optimizer Configurations
@@ -639,6 +719,7 @@ def _register_configs():
 
     cs.store(group="logger", name="wandb", node=WandbLoggerConfig)
     cs.store(group="logger", name="tensorboard", node=TensorboardLoggerConfig)
+    cs.store(group="logger", name="trackio", node=TrackioLoggerConfig)
     cs.store(group="logger", name="csv", node=CSVLoggerConfig)
     cs.store(group="logger", name="base", node=LoggerConfig)
 

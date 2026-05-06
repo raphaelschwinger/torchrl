@@ -176,9 +176,10 @@ TorchRL offers a series of custom built-in environments.
     :template: rl_template.rst
 
     ChessEnv
+    FinancialRegimeEnv
+    LLMHashingEnv
     PendulumEnv
     TicTacToeEnv
-    LLMHashingEnv
 
 Domain-specific
 ---------------
@@ -190,6 +191,7 @@ Domain-specific
     ModelBasedEnvBase
     model_based.dreamer.DreamerEnv
     model_based.dreamer.DreamerDecoder
+    model_based.imagined.ImaginedEnv
 
 Helpers
 -------

@@ -36,20 +36,20 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "torch>=2.1.0",
     "pyvers",
     "numpy",
     "packaging",
     "cloudpickle",
-    "tensordict>=0.10.0,<0.11.0",
     "mujoco>=3.4.0",
     "dm-control>=1.0.36",
     "wandb>=0.24.0",
     "tqdm>=4.67.1",
     "hydra-core>=1.3.2",
     "torchvision>=0.23.0",
+    "tensordict>=0.12.0,<0.13.0",
 ]
 
 [project.optional-dependencies]
@@ -57,7 +57,7 @@ atari = ["gymnasium[atari]"]
 dm_control = ["dm_control"]
 replay_buffer = ["torch>=2.7.0"]
 gym_continuous = ["gymnasium<1.0", "mujoco"]
-rendering = ["moviepy<2.0.0"]
+rendering = ["moviepy", "torchcodec>=0.10.0"]
 tests = [
     "pytest",
     "pyyaml",
@@ -74,6 +74,7 @@ tests = [
     "pytest-forked",
     "pytest-random-order",
     "pytest-repeat",
+    "pytest-isolate",
 ]
 utils = [
     "tensorboard",
@@ -97,9 +98,15 @@ offline-data = [
 marl = ["vmas>=1.2.10", "pettingzoo>=1.24.1", "dm-meltingpot; python_version>='3.11'"]
 open_spiel = ["open_spiel>=1.5"]
 brax = ["jax>=0.7.0; python_version>='3.11'", "brax; python_version>='3.11'"]
+genesis = ["genesis-world"]
+procgen = ["procgen; python_version<'3.10'"]
+pilco = [
+    "botorch",
+    "gpytorch",
+]
+# Base LLM dependencies (no inference backend - use llm-vllm or llm-sglang)
 llm = [
     "transformers",
-    "vllm",
     "playwright",
     "datasets",
     "langdetect",
@@ -111,12 +118,27 @@ llm = [
     "einops",
     "safetensors",
 ]
+# LLM with vLLM backend
+llm-vllm = [
+    "torchrl[llm]",
+    "vllm>=0.17",
+]
+# LLM with SGLang backend
+llm-sglang = [
+    "torchrl[llm]",
+    "sglang[all]",
+]
+# LLM with both backends
+llm-all = [
+    "torchrl[llm]",
+    "vllm>=0.17",
+    "sglang[all]",
+]
 grpo = [
     # Core dependencies for GRPO training
-    "datasets",
+    "torchrl[llm-vllm]",
     "peft",
     "wandb",
-    "vllm",
     "transformers",
     "accelerate",
     "ray",
@@ -125,10 +147,6 @@ grpo = [
     "flash-attn",
     "bitsandbytes",
     "xformers",
-    # LLM-related dependencies that may be needed
-    "nltk",
-    "langdetect", 
-    "immutabledict",
 ]
 dev = [
     "pre-commit",
@@ -151,7 +169,7 @@ version_scheme = "post-release"
 # Local scheme is handled by setup.py (appends +g<sha> unless on release/v<version> branch)
 local_scheme = "no-local-version"
 version_file = "torchrl/_version.py"
-fallback_version = "0.10.0"
+fallback_version = "0.12.0"
 
 [tool.setuptools.packages.find]
 exclude = [
@@ -165,7 +183,16 @@ exclude = [
 
 [tool.setuptools.package-data]
 "*" = ["*.txt", "*.md"]
-"torchrl" = ["csrc/*.h"]
+"torchrl" = ["csrc/*.h", "csrc/*.cu"]
+
+[tool.codespell]
+skip = ".git,*.svg,*.png,*.jpg,*.css,*.js,*.tmp,docs/_local_build,docs/source/reference/generated,torchrl/_version.py,.worktrees,0.9"
+# multicat: multi-categorical variable name
+# nd: n-dimensional variable name/abbreviation
+# splitted: used as variable name
+# te: Telugu language code in ifeval
+# uncompressible: used as class/function name in benchmarks
+ignore-words-list = "multicat,nd,splitted,te,uncompressible"
 
 [tool.usort]
 first_party_detection = false

@@ -80,23 +80,13 @@ Key learnings:
 import warnings
 
 warnings.filterwarnings("ignore")
+
+# Set multiprocessing start method to fork if not already set
+# This allows the tutorial to run as a script without if __name__ == "__main__"
 from torch import multiprocessing
 
-# TorchRL prefers spawn method, that restricts creation of  ``~torchrl.envs.ParallelEnv`` inside
-# `__main__` method call, but for the easy of reading the code switch to fork
-# which is also a default spawn method in Google's Colaboratory
-try:
-    is_sphinx = __sphinx_build__
-except NameError:
-    is_sphinx = False
-
-try:
-    multiprocessing.set_start_method(
-        "spawn" if is_sphinx else "fork", force=not is_sphinx
-    )
-except RuntimeError:
-    pass
-
+if multiprocessing.get_start_method(allow_none=True) is None:
+    multiprocessing.set_start_method("fork")
 # sphinx_gallery_end_ignore
 
 from collections import defaultdict
@@ -265,7 +255,7 @@ def _step(tensordict):
     new_thdot = new_thdot.clamp(
         -tensordict["params", "max_speed"], tensordict["params", "max_speed"]
     )
-    new_th = th + new_thdot * dt
+    new_th = angle_normalize(th + new_thdot * dt)
     reward = -costs.view(*tensordict.shape, 1)
     done = torch.zeros_like(reward, dtype=torch.bool)
     out = TensorDict(
@@ -472,7 +462,9 @@ def make_composite_from_td(td):
 
 
 def _set_seed(self, seed: int | None) -> None:
-    rng = torch.manual_seed(seed)
+    rng = torch.Generator()
+    if seed is not None:
+        rng.manual_seed(seed)
     self.rng = rng
 
 

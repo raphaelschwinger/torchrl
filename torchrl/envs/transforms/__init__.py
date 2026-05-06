@@ -4,7 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from .gym_transforms import EndOfLifeTransform
-from .llm import KLRewardTransform
+from .mean_action_selector import MeanActionSelector
 from .module import ModuleTransform
 from .r3m import R3MTransform
 from .ray_service import RayTransform
@@ -30,6 +30,7 @@ from .transforms import (
     DoubleToFloat,
     DTypeCastTransform,
     ExcludeTransform,
+    ExpandAs,
     FiniteTensorDictCheck,
     FlattenObservation,
     FrameSkipTransform,
@@ -45,6 +46,7 @@ from .transforms import (
     PermuteTransform,
     PinMemoryTransform,
     RandomCropTensorDict,
+    RandomTruncationTransform,
     RemoveEmptySpecs,
     RenameTransform,
     Resize,
@@ -75,6 +77,7 @@ from .vc1 import VC1Transform
 from .vecnorm import VecNormV2
 from .vip import VIPRewardTransform, VIPTransform
 
+
 __all__ = [
     "ActionDiscretizer",
     "ActionMask",
@@ -97,14 +100,15 @@ __all__ = [
     "DoubleToFloat",
     "EndOfLifeTransform",
     "ExcludeTransform",
+    "ExpandAs",
     "FiniteTensorDictCheck",
     "FlattenObservation",
     "FrameSkipTransform",
     "GrayScale",
     "Hash",
     "InitTracker",
-    "KLRewardTransform",
     "LineariseRewards",
+    "MeanActionSelector",
     "ModuleTransform",
     "MultiAction",
     "MultiStepTransform",
@@ -115,6 +119,7 @@ __all__ = [
     "PinMemoryTransform",
     "R3MTransform",
     "RandomCropTensorDict",
+    "RandomTruncationTransform",
     "RayTransform",
     "RemoveEmptySpecs",
     "RenameTransform",

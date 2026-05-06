@@ -18,6 +18,7 @@ from torch import nn
 from torchrl.data.tensor_specs import Bounded, Composite
 from torchrl.modules import (
     CEMPlanner,
+    DiffusionActor,
     DTActor,
     GRU,
     GRUCell,
@@ -465,6 +466,19 @@ class TestDreamerComponents:
         det_state = torch.randn(*batch_size, *temporal_size, deter_size, device=device)
         obs = decoder(stoch_state, det_state)
         assert obs.shape == (*batch_size, *temporal_size, 3, 64, 64)
+
+    @pytest.mark.parametrize("depth", [32, 64])
+    @pytest.mark.parametrize("out_channels", [1, 3])
+    @pytest.mark.parametrize("stoch_size", [10])
+    @pytest.mark.parametrize("deter_size", [20])
+    def test_dreamer_decoder_out_channels(
+        self, device, batch_size, depth, out_channels, stoch_size, deter_size
+    ):
+        decoder = ObsDecoder(channels=depth, out_channels=out_channels).to(device)
+        stoch_state = torch.randn(*batch_size, stoch_size, device=device)
+        det_state = torch.randn(*batch_size, deter_size, device=device)
+        obs = decoder(stoch_state, det_state)
+        assert obs.shape == (*batch_size, out_channels, 64, 64)
 
     @pytest.mark.parametrize("stoch_size", [10, 20])
     @pytest.mark.parametrize("deter_size", [20, 30])
@@ -944,6 +958,7 @@ class TestMultiAgent:
             assert p in param_set
 
     def test_multiagent_mlp_lazy(self):
+        torch.manual_seed(0)
         mlp = MultiAgentMLP(
             n_agent_inputs=None,
             n_agent_outputs=6,
@@ -1160,6 +1175,7 @@ class TestMultiAgent:
                     assert not torch.allclose(out[..., i, :], out[..., j, :])
 
     def test_multiagent_cnn_lazy(self):
+        torch.manual_seed(42)
         n_agents = 5
         n_channels = 3
         cnn = MultiAgentConvNet(
@@ -1215,6 +1231,7 @@ class TestMultiAgent:
         centralized,
         share_params,
     ):
+        torch.manual_seed(42)
         actor_net = MultiAgentConvNet(
             in_features=4,
             num_cells=[5, 5],
@@ -1664,6 +1681,74 @@ class TestBatchRenorm:
         bn.eval()
         brn.eval()
         torch.testing.assert_close(bn(data_test), brn(data_test))
+
+
+def test_convnetblock_uses_both_resnets():
+    """Regression test for https://github.com/pytorch/rl/issues/3519."""
+    from torchrl.modules.models.recipes.impala import _ConvNetBlock
+
+    block = _ConvNetBlock(num_ch=16)
+    x = torch.randn(2, 3, 8, 8)
+    out = block(x).mean()
+    out.backward()
+
+    resnet1_grad = sum(p.grad.abs().sum() for p in block.resnet1.parameters())
+    resnet2_grad = sum(p.grad.abs().sum() for p in block.resnet2.parameters())
+    assert resnet1_grad > 0, "resnet1 parameters received no gradients"
+    assert resnet2_grad > 0, "resnet2 parameters received no gradients"
+
+
+class TestDiffusionActor:
+    def test_output_shape(self):
+        actor = DiffusionActor(action_dim=2, obs_dim=3, num_steps=5)
+        td = TensorDict({"observation": torch.randn(4, 3)}, batch_size=[4])
+        td = actor(td)
+        assert td["action"].shape == torch.Size([4, 2])
+
+    def test_unbatched(self):
+        actor = DiffusionActor(action_dim=4, obs_dim=6, num_steps=3)
+        td = TensorDict({"observation": torch.randn(6)}, batch_size=[])
+        td = actor(td)
+        assert td["action"].shape == torch.Size([4])
+
+    def test_custom_in_out_keys(self):
+        actor = DiffusionActor(
+            action_dim=2,
+            obs_dim=3,
+            num_steps=3,
+            in_keys=["obs"],
+            out_keys=["act"],
+        )
+        assert actor.in_keys == ["obs"]
+        assert actor.out_keys == ["act"]
+        td = TensorDict({"obs": torch.randn(4, 3)}, batch_size=[4])
+        td = actor(td)
+        assert td["act"].shape == torch.Size([4, 2])
+
+    def test_custom_score_network(self):
+        score_net = nn.Linear(2 + 3 + 1, 2)
+        actor = DiffusionActor(
+            action_dim=2, obs_dim=3, score_network=score_net, num_steps=3
+        )
+        td = TensorDict({"observation": torch.randn(4, 3)}, batch_size=[4])
+        td = actor(td)
+        assert td["action"].shape == torch.Size([4, 2])
+
+    def test_spec_wrapping(self):
+        from torchrl.data.tensor_specs import Bounded
+
+        spec = Bounded(low=-1.0, high=1.0, shape=(2,))
+        actor = DiffusionActor(action_dim=2, obs_dim=3, num_steps=3, spec=spec)
+        assert actor.spec is not None
+
+    def test_gradients_flow(self):
+        actor = DiffusionActor(action_dim=2, obs_dim=3, num_steps=3)
+        obs = torch.randn(4, 3)
+        td = TensorDict({"observation": obs}, batch_size=[4])
+        td = actor(td)
+        td["action"].sum().backward()
+        for p in actor.parameters():
+            assert p.grad is not None
 
 
 if __name__ == "__main__":

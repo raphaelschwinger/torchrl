@@ -34,6 +34,7 @@ def sampling_params():
 class TestAsyncVLLMIntegration:
     """Integration tests for AsyncVLLM with real models."""
 
+    @pytest.mark.gpu
     @pytest.mark.skipif(not _has_vllm, reason="vllm not available")
     @pytest.mark.skipif(not _has_ray, reason="ray not available")
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -106,6 +107,7 @@ class TestAsyncVLLMIntegration:
         finally:
             service.shutdown()
 
+    @pytest.mark.gpu
     @pytest.mark.skipif(not _has_vllm, reason="vllm not available")
     @pytest.mark.skipif(not _has_ray, reason="ray not available")
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -159,8 +161,8 @@ class TestAsyncVLLMIntegration:
                     self.policy = policy_ref
                     # The vLLMUpdater expects the collector to have a _collector attribute
                     # for Ray-based collectors, or a policy.model for local collectors
-                    # We'll use the local collector pattern and patch policy.model to be the Ray actor
-                    self.policy.model = vllm_service.actors[0]
+                    # Use object.__setattr__ to bypass nn.Module type checks
+                    object.__setattr__(self.policy, "model", vllm_service.actors[0])
 
                 def increment_version(self):
                     pass

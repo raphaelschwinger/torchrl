@@ -1,7 +1,9 @@
 [![Unit-tests](https://github.com/pytorch/rl/actions/workflows/test-linux.yml/badge.svg)](https://github.com/pytorch/rl/actions/workflows/test-linux.yml)
+[![Nightly](https://github.com/pytorch/rl/actions/workflows/nightly_orchestrator.yml/badge.svg)](https://pytorch.github.io/rl/nightly-status/)
 [![Documentation](https://img.shields.io/badge/Documentation-blue.svg)](https://pytorch.org/rl/)
 [![Benchmarks](https://img.shields.io/badge/Benchmarks-blue.svg)](https://pytorch.github.io/rl/dev/bench/)
 [![codecov](https://codecov.io/gh/pytorch/rl/branch/main/graph/badge.svg?token=HcpK1ILV6r)](https://codecov.io/gh/pytorch/rl)
+[![Flaky Tests](https://img.shields.io/endpoint?url=https://pytorch.github.io/rl/flaky/badge.json)](https://pytorch.github.io/rl/flaky/)
 [![Twitter Follow](https://img.shields.io/twitter/follow/torchrl1?style=social)](https://twitter.com/torchrl1)
 [![Python version](https://img.shields.io/pypi/pyversions/torchrl.svg)](https://www.python.org/downloads/)
 [![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/pytorch/rl/blob/main/LICENSE)
@@ -265,7 +267,7 @@ lines of code*!
   from tensordict.nn.distributions import NormalParamExtractor
   from torch import nn
   
-  from torchrl.collectors import SyncDataCollector
+  from torchrl.collectors import Collector
   from torchrl.data.replay_buffers import TensorDictReplayBuffer, \
     LazyTensorStorage, SamplerWithoutReplacement
   from torchrl.envs.libs.gym import GymEnv
@@ -306,7 +308,7 @@ lines of code*!
     sampler=SamplerWithoutReplacement(),
     batch_size=50,
     )
-  collector = SyncDataCollector(
+  collector = Collector(
     env,
     actor,
     frames_per_batch=1000,
@@ -338,7 +340,7 @@ relies on tensordict to carry data from one function to another during a rollout
 execution:
 ![Alt Text](https://github.com/pytorch/rl/blob/main/docs/source/_static/img/rollout.gif)
 
-`TensorDict` makes it easy to re-use pieces of code across environments, models and
+`TensorDict` makes it easy to reuse pieces of code across environments, models and
 algorithms.
   <details>
     <summary>Code</summary>
@@ -392,7 +394,7 @@ to be easily recycled across settings.
           optim.step()
           optim.zero_grad()
   ```
-  This training loop can be re-used across algorithms as it makes a minimal number of assumptions about the structure of the data.
+  This training loop can be reused across algorithms as it makes a minimal number of assumptions about the structure of the data.
   </details>
 
   TensorDict supports multiple tensor operations on its device and shape
@@ -493,7 +495,7 @@ And it is `functorch` and `torch.compile` compatible!
 
   ```python
   env_make = lambda: GymEnv("Pendulum-v1", from_pixels=True)
-  collector = MultiaSyncDataCollector(
+  collector = MultiAsyncCollector(
       [env_make, env_make],
       policy=policy,
       devices=["cuda:0", "cuda:0"],
@@ -631,7 +633,7 @@ And it is `functorch` and `torch.compile` compatible!
       out_features=1,
       activation=nn.ELU,
   )
-  # Wrap the policy and value funciton in a common module
+  # Wrap the policy and value function in a common module
   actor_value = ActorValueOperator(common_module, policy_module, value_module)
   # standalone policy from this
   standalone_policy = actor_value.get_policy_operator()

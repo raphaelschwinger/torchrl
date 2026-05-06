@@ -32,7 +32,12 @@ from torchrl.objectives.utils import (
     distance_loss,
     ValueEstimators,
 )
-from torchrl.objectives.value import TD0Estimator, TD1Estimator, TDLambdaEstimator
+from torchrl.objectives.value import (
+    TD0Estimator,
+    TD1Estimator,
+    TDLambdaEstimator,
+    ValueEstimatorBase,
+)
 
 
 class CQLLoss(LossModule):
@@ -261,6 +266,9 @@ class CQLLoss(LossModule):
     tensor_keys: _AcceptedKeys
     default_keys = _AcceptedKeys
     default_value_estimator = ValueEstimators.TD0
+    _schedulable_buffers = frozenset(
+        {"alpha_init", "min_log_alpha", "max_log_alpha", "log_alpha"}
+    )
 
     actor_network: TensorDictModule
     qvalue_network: TensorDictModule
@@ -293,6 +301,7 @@ class CQLLoss(LossModule):
         lagrange_thresh: float = 0.0,
         reduction: str | None = None,
         deactivate_vmap: bool = False,
+        scalar_output_mode: str | None = None,
     ) -> None:
         self._out_keys = None
         if reduction is None:
@@ -376,6 +385,23 @@ class CQLLoss(LossModule):
             )
         self._make_vmap()
         self.reduction = reduction
+
+        # Handle scalar_output_mode for reduction="none"
+        if reduction == "none" and scalar_output_mode is None:
+            warnings.warn(
+                "CQLLoss with reduction='none' cannot include scalar values (alpha, entropy) "
+                "in the output TensorDict without changing their shape. These values will be "
+                "excluded from the output. You can access them via `loss_module._alpha` and "
+                "compute entropy from the log_prob in the actor loss metadata. "
+                "To suppress this warning, pass `scalar_output_mode='exclude'` to the constructor. "
+                "Alternatively, pass `scalar_output_mode='non_tensor'` to include them as non-tensor data. "
+                "This is a known limitation we're working on improving.",
+                category=UserWarning,
+                stacklevel=2,
+            )
+            scalar_output_mode = "exclude"
+        self.scalar_output_mode = scalar_output_mode
+
         _ = self.target_entropy
 
     def _make_vmap(self):
@@ -446,6 +472,13 @@ class CQLLoss(LossModule):
     def make_value_estimator(self, value_type: ValueEstimators = None, **hyperparams):
         if value_type is None:
             value_type = self.default_value_estimator
+
+        # Handle ValueEstimatorBase instance or class
+        if isinstance(value_type, ValueEstimatorBase) or (
+            isinstance(value_type, type) and issubclass(value_type, ValueEstimatorBase)
+        ):
+            return LossModule.make_value_estimator(self, value_type, **hyperparams)
+
         self.value_type = value_type
 
         # we will take care of computing the next value inside this module
@@ -536,18 +569,28 @@ class CQLLoss(LossModule):
         tensordict.set(
             self.tensor_keys.priority, metadata.pop("td_error").detach().max(0).values
         )
+        entropy = -actor_metadata.get(self.tensor_keys.log_prob)
         out = {
             "loss_actor": loss_actor,
             "loss_actor_bc": loss_actor_bc,
             "loss_qvalue": q_loss,
             "loss_cql": cql_loss,
             "loss_alpha": loss_alpha,
-            "alpha": self._alpha,
-            "entropy": -actor_metadata.get(self.tensor_keys.log_prob).mean().detach(),
         }
         if self.with_lagrange:
             out["loss_alpha_prime"] = alpha_prime_loss.mean()
-        td_loss = TensorDict(out)
+
+        # Handle batch_size and scalar values (alpha, entropy) based on reduction mode
+        if self.reduction == "none":
+            batch_size = tensordict.batch_size
+            td_loss = TensorDict(out, batch_size=batch_size)
+            if self.scalar_output_mode == "non_tensor":
+                td_loss.set_non_tensor("alpha", self._alpha)
+                td_loss.set_non_tensor("entropy", entropy.detach().mean())
+        else:
+            out["alpha"] = self._alpha
+            out["entropy"] = entropy.detach().mean()
+            td_loss = TensorDict(out)
         self._clear_weakrefs(
             tensordict,
             td_loss,
@@ -1170,6 +1213,13 @@ class DiscreteCQLLoss(LossModule):
     def make_value_estimator(self, value_type: ValueEstimators = None, **hyperparams):
         if value_type is None:
             value_type = self.default_value_estimator
+
+        # Handle ValueEstimatorBase instance or class
+        if isinstance(value_type, ValueEstimatorBase) or (
+            isinstance(value_type, type) and issubclass(value_type, ValueEstimatorBase)
+        ):
+            return LossModule.make_value_estimator(self, value_type, **hyperparams)
+
         self.value_type = value_type
 
         # we will take care of computing the next value inside this module

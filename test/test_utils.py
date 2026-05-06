@@ -14,9 +14,10 @@ from unittest import mock
 import pytest
 
 import torch
+
+import torchrl.envs.libs.gym as _gym_lib
 from packaging import version
 from torchrl._utils import _rng_decorator, get_binary_env_var, implement_for
-
 from torchrl.envs.libs.gym import gym_backend, GymWrapper, set_gym_backend
 
 from torchrl.objectives.utils import _pseudo_vmap
@@ -24,6 +25,43 @@ from torchrl.objectives.utils import _pseudo_vmap
 from torchrl.testing import get_default_devices, gym_helpers as _gym_helpers
 
 TORCH_VERSION = version.parse(version.parse(torch.__version__).base_version)
+
+
+def _clear_gym_implement_for_state():
+    """Clear all gym/gymnasium-related state from implement_for caches.
+
+    This is necessary for test isolation when mocking gym/gymnasium modules.
+    Clears _cache_modules, _implementations, and resets DEFAULT_GYM, then
+    re-resolves the correct implementations based on the real installed backend.
+    Does NOT clear _lazy_impl since it contains all registered implementations
+    from import time.
+    """
+    # Reset the global DEFAULT_GYM to force re-initialization
+    _gym_lib.DEFAULT_GYM = None
+
+    # Clear module cache to force re-import
+    implement_for._cache_modules.pop("gym", None)
+    implement_for._cache_modules.pop("gymnasium", None)
+
+    # Clear implementations to force re-evaluation of which implementation wins
+    keys_to_remove = [
+        k
+        for k in implement_for._implementations
+        if "gym" in k.lower() or "gymnasium" in k.lower()
+    ]
+    for k in keys_to_remove:
+        implement_for._implementations.pop(k, None)
+
+    # Re-resolve gym-related module-level functions from _lazy_impl.
+    # set_gym_backend().module_set() may have replaced module-level functions
+    # (like _set_gym_environments, _set_gym_args) with implementations for a
+    # mocked backend. We must re-dispatch via _lazy_impl so that implement_for
+    # re-evaluates the real installed gym version and calls module_set() with
+    # the correct implementation.
+    for func_name in list(implement_for._lazy_impl.keys()):
+        if "gym" in func_name.lower():
+            for local_call in implement_for._lazy_impl[func_name]:
+                local_call()
 
 
 @pytest.mark.parametrize("value", ["True", "1", "true"])
@@ -192,6 +230,7 @@ def test_implement_for_check_versions(
     )
 
 
+@pytest.mark.isolate
 @pytest.mark.parametrize(
     "gymnasium_version, expected_from_version_gymnasium, expected_to_version_gymnasium",
     [
@@ -219,93 +258,136 @@ def test_set_gym_environments(
     expected_from_version_gymnasium,
     expected_to_version_gymnasium,
 ):
-    # mock gym and gymnasium imports
-    mock_gym = uncallable(mock.MagicMock())
-    mock_gym.__version__ = gym_version
-    mock_gym.__name__ = "gym"
-    sys.modules["gym"] = mock_gym
+    # Save original modules to restore after the test
+    original_gym = sys.modules.get("gym")
+    original_gymnasium = sys.modules.get("gymnasium")
 
-    mock_gymnasium = uncallable(mock.MagicMock())
-    mock_gymnasium.__version__ = gymnasium_version
-    mock_gymnasium.__name__ = "gymnasium"
-    sys.modules["gymnasium"] = mock_gymnasium
+    try:
+        # mock gym and gymnasium imports
+        mock_gym = uncallable(mock.MagicMock())
+        mock_gym.__version__ = gym_version
+        mock_gym.__name__ = "gym"
+        sys.modules["gym"] = mock_gym
 
-    import gym
-    import gymnasium
+        mock_gymnasium = uncallable(mock.MagicMock())
+        mock_gymnasium.__version__ = gymnasium_version
+        mock_gymnasium.__name__ = "gymnasium"
+        sys.modules["gymnasium"] = mock_gymnasium
 
-    # look for the right function that should be called according to gym versions (and same for gymnasium)
-    expected_fn_gymnasium = None
-    expected_fn_gym = None
-    for impfor in implement_for._setters:
-        if impfor.fn.__name__ == "_set_gym_environments":
-            if (impfor.module_name, impfor.from_version, impfor.to_version) == (
-                "gym",
-                expected_from_version_gym,
-                expected_to_version_gym,
-            ):
-                expected_fn_gym = impfor.fn
-            elif (impfor.module_name, impfor.from_version, impfor.to_version) == (
-                "gymnasium",
-                expected_from_version_gymnasium,
-                expected_to_version_gymnasium,
-            ):
-                expected_fn_gymnasium = impfor.fn
-            if expected_fn_gym is not None and expected_fn_gymnasium is not None:
-                break
+        import gym
+        import gymnasium
 
-    with set_gym_backend(gymnasium):
-        assert (
-            _gym_helpers._set_gym_environments is expected_fn_gymnasium
-        ), expected_fn_gym
+        # look for the right function that should be called according to gym versions (and same for gymnasium)
+        expected_fn_gymnasium = None
+        expected_fn_gym = None
+        for impfor in implement_for._setters:
+            if impfor.fn.__name__ == "_set_gym_environments":
+                if (impfor.module_name, impfor.from_version, impfor.to_version) == (
+                    "gym",
+                    expected_from_version_gym,
+                    expected_to_version_gym,
+                ):
+                    expected_fn_gym = impfor.fn
+                elif (impfor.module_name, impfor.from_version, impfor.to_version) == (
+                    "gymnasium",
+                    expected_from_version_gymnasium,
+                    expected_to_version_gymnasium,
+                ):
+                    expected_fn_gymnasium = impfor.fn
+                if expected_fn_gym is not None and expected_fn_gymnasium is not None:
+                    break
 
-    with set_gym_backend(gym):
-        assert (
-            _gym_helpers._set_gym_environments is expected_fn_gym
-        ), expected_fn_gymnasium
-
-    with set_gym_backend(gymnasium):
-        assert (
-            _gym_helpers._set_gym_environments is expected_fn_gymnasium
-        ), expected_fn_gym
-
-
-def test_set_gym_environments_no_version_gymnasium_found():
-    gymnasium_version = "0.26.0"
-    gymnasium_name = "gymnasium"
-    mock_gymnasium = uncallable(mock.MagicMock())
-    mock_gymnasium.__version__ = gymnasium_version
-    mock_gymnasium.__name__ = gymnasium_name
-    sys.modules["gymnasium"] = mock_gymnasium
-
-    import gymnasium
-
-    assert gymnasium.__version__ == "0.26.0"
-
-    # this version of gymnasium does not exist in implement_for
-    # therefore, set_gym_backend will not set anything and raise an ImportError.
-    msg = f"could not set anything related to gym backend {gymnasium_name} with version={gymnasium_version}."
-    with pytest.raises(ImportError, match=msg):
         with set_gym_backend(gymnasium):
-            _gym_helpers._set_gym_environments()
+            assert (
+                _gym_helpers._set_gym_environments is expected_fn_gymnasium
+            ), expected_fn_gym
+
+        with set_gym_backend(gym):
+            assert (
+                _gym_helpers._set_gym_environments is expected_fn_gym
+            ), expected_fn_gymnasium
+
+        with set_gym_backend(gymnasium):
+            assert (
+                _gym_helpers._set_gym_environments is expected_fn_gymnasium
+            ), expected_fn_gym
+
+    finally:
+        # Restore original modules to avoid polluting other tests
+        if original_gym is not None:
+            sys.modules["gym"] = original_gym
+        else:
+            sys.modules.pop("gym", None)
+        if original_gymnasium is not None:
+            sys.modules["gymnasium"] = original_gymnasium
+        else:
+            sys.modules.pop("gymnasium", None)
+        _clear_gym_implement_for_state()
 
 
+@pytest.mark.isolate
+def test_set_gym_environments_no_version_gymnasium_found():
+    # Save original module to restore after the test
+    original_gymnasium = sys.modules.get("gymnasium")
+
+    try:
+        gymnasium_version = "0.26.0"
+        gymnasium_name = "gymnasium"
+        mock_gymnasium = uncallable(mock.MagicMock())
+        mock_gymnasium.__version__ = gymnasium_version
+        mock_gymnasium.__name__ = gymnasium_name
+        sys.modules["gymnasium"] = mock_gymnasium
+
+        import gymnasium
+
+        assert gymnasium.__version__ == "0.26.0"
+
+        # this version of gymnasium does not exist in implement_for
+        # therefore, set_gym_backend will not set anything and raise an ImportError.
+        msg = f"could not set anything related to gym backend {gymnasium_name} with version={gymnasium_version}."
+        with pytest.raises(ImportError, match=msg):
+            with set_gym_backend(gymnasium):
+                _gym_helpers._set_gym_environments()
+
+    finally:
+        # Restore original module to avoid polluting other tests
+        if original_gymnasium is not None:
+            sys.modules["gymnasium"] = original_gymnasium
+        else:
+            sys.modules.pop("gymnasium", None)
+        _clear_gym_implement_for_state()
+
+
+@pytest.mark.isolate
 def test_set_gym_backend_types():
-    mock_gym = uncallable(mock.MagicMock())
-    gym_version = "0.26.0"
-    mock_gym.__version__ = gym_version
-    mock_gym.__name__ = "gym"
-    sys.modules["gym"] = mock_gym
+    # Save original module to restore after the test
+    original_gym = sys.modules.get("gym")
 
-    import gym
+    try:
+        mock_gym = uncallable(mock.MagicMock())
+        gym_version = "0.26.0"
+        mock_gym.__version__ = gym_version
+        mock_gym.__name__ = "gym"
+        sys.modules["gym"] = mock_gym
 
-    assert not callable(gym)
+        import gym
 
-    with set_gym_backend("gym"):
-        assert gym_backend() == gym
-    with set_gym_backend(lambda: gym):
-        assert gym_backend() == gym
-    with set_gym_backend(gym):
-        assert gym_backend() == gym
+        assert not callable(gym)
+
+        with set_gym_backend("gym"):
+            assert gym_backend() == gym
+        with set_gym_backend(lambda: gym):
+            assert gym_backend() == gym
+        with set_gym_backend(gym):
+            assert gym_backend() == gym
+
+    finally:
+        # Restore original module to avoid polluting other tests
+        if original_gym is not None:
+            sys.modules["gym"] = original_gym
+        else:
+            sys.modules.pop("gym", None)
+        _clear_gym_implement_for_state()
 
 
 # we check that the order where these funs are defined won't affect which is called
@@ -324,51 +406,69 @@ def torch_foo():  # noqa: F811
     return 1
 
 
+@pytest.mark.isolate
 def test_set_gym_nested():
-    mock_gym = uncallable(mock.MagicMock())
-    mock_gym.__version__ = "0.21.0"
-    mock_gym.__name__ = "gym"
-    sys.modules["gym"] = mock_gym
+    # Save original modules to restore after the test
+    original_gym = sys.modules.get("gym")
+    original_gymnasium = sys.modules.get("gymnasium")
 
-    mock_gymnasium = uncallable(mock.MagicMock())
-    mock_gymnasium.__version__ = "0.28.0"
-    mock_gymnasium.__name__ = "gymnasium"
-    sys.modules["gymnasium"] = mock_gymnasium
+    try:
+        mock_gym = uncallable(mock.MagicMock())
+        mock_gym.__version__ = "0.21.0"
+        mock_gym.__name__ = "gym"
+        sys.modules["gym"] = mock_gym
 
-    import gym
-    import gymnasium
+        mock_gymnasium = uncallable(mock.MagicMock())
+        mock_gymnasium.__version__ = "0.28.0"
+        mock_gymnasium.__name__ = "gymnasium"
+        sys.modules["gymnasium"] = mock_gymnasium
 
-    assert torch_foo() == 1
+        import gym
+        import gymnasium
 
-    class MockGym:
-        _is_batched = False
-
-    with set_gym_backend(gym):
-        GymWrapper._output_transform(
-            MockGym, (1, 2, True, {})
-        )  # would break with gymnasium
         assert torch_foo() == 1
-        with set_gym_backend(gymnasium):
+
+        class MockGym:
+            _is_batched = False
+
+        with set_gym_backend(gym):
             GymWrapper._output_transform(
-                MockGym, (1, 2, True, True, {})
-            )  # would break with gym
+                MockGym, (1, 2, True, {})
+            )  # would break with gymnasium
             assert torch_foo() == 1
-        GymWrapper._output_transform(
-            MockGym, (1, 2, True, {})
-        )  # would break with gymnasium
-    with set_gym_backend("gym"):
-        GymWrapper._output_transform(
-            MockGym, (1, 2, True, {})
-        )  # would break with gymnasium
-        assert torch_foo() == 1
-        with set_gym_backend("gymnasium"):
+            with set_gym_backend(gymnasium):
+                GymWrapper._output_transform(
+                    MockGym, (1, 2, True, True, {})
+                )  # would break with gym
+                assert torch_foo() == 1
             GymWrapper._output_transform(
-                MockGym, (1, 2, True, True, {})
-            )  # would break with gym
+                MockGym, (1, 2, True, {})
+            )  # would break with gymnasium
+        with set_gym_backend("gym"):
+            GymWrapper._output_transform(
+                MockGym, (1, 2, True, {})
+            )  # would break with gymnasium
             assert torch_foo() == 1
-        GymWrapper._output_transform(
-            MockGym, (1, 2, True, {})
-        )  # would break with gymnasium
+            with set_gym_backend("gymnasium"):
+                GymWrapper._output_transform(
+                    MockGym, (1, 2, True, True, {})
+                )  # would break with gym
+                assert torch_foo() == 1
+            GymWrapper._output_transform(
+                MockGym, (1, 2, True, {})
+            )  # would break with gymnasium
+
+    finally:
+        # Restore original modules to avoid polluting other tests
+        if original_gym is not None:
+            sys.modules["gym"] = original_gym
+        else:
+            sys.modules.pop("gym", None)
+        if original_gymnasium is not None:
+            sys.modules["gymnasium"] = original_gymnasium
+        else:
+            sys.modules.pop("gymnasium", None)
+        _clear_gym_implement_for_state()
 
 
 @pytest.mark.parametrize("device", get_default_devices())
@@ -414,6 +514,109 @@ def test_vmap_in_out_dims(in_dim, out_dim):
     # Assert the results are as expected
     assert torch.allclose(actual_result, expected_result)
     assert torch.allclose(pseudo_actual_result, expected_result)
+
+
+class TestProfilingDecorator:
+    """Tests for the TORCHRL_PROFILING-gated profiling decorator."""
+
+    def test_decorator_is_identity_when_unarmed(self, monkeypatch):
+        # Force the decorator's import-time gate to "off" regardless of how the
+        # test process was launched, so we can assert the zero-overhead branch.
+        from torchrl import _utils
+
+        monkeypatch.setattr(_utils, "_PROFILING_ALLOWED", False)
+
+        def fn(x):
+            return x + 1
+
+        decorated = _utils._maybe_record_function_decorator("test")(fn)
+        assert decorated is fn  # truly identity, no closure
+
+    def test_decorator_wraps_when_armed(self, monkeypatch):
+        from torchrl import _utils
+
+        monkeypatch.setattr(_utils, "_PROFILING_ALLOWED", True)
+        monkeypatch.setattr(_utils, "_PROFILING_ENABLED", True)
+
+        def fn(x):
+            return x + 1
+
+        decorated = _utils._maybe_record_function_decorator("test")(fn)
+        assert decorated is not fn
+        assert decorated.__wrapped__ is fn  # functools.wraps preserves
+        assert decorated(5) == 6
+
+    def test_set_profiling_enabled_warns_when_unarmed(self, monkeypatch):
+        from torchrl import _utils
+
+        monkeypatch.setattr(_utils, "_PROFILING_ALLOWED", False)
+        monkeypatch.setattr(_utils, "_PROFILING_ENABLED", False)
+
+        with pytest.warns(UserWarning, match="TORCHRL_PROFILING=1 was"):
+            _utils.set_profiling_enabled(True)
+        # Must remain off — the warning is a no-op gate, not a soft enable.
+        assert _utils._PROFILING_ENABLED is False
+
+    def test_set_profiling_enabled_toggles_when_armed(self, monkeypatch):
+        from torchrl import _utils
+
+        monkeypatch.setattr(_utils, "_PROFILING_ALLOWED", True)
+        monkeypatch.setattr(_utils, "_PROFILING_ENABLED", True)
+
+        _utils.set_profiling_enabled(False)
+        assert _utils._PROFILING_ENABLED is False
+        _utils.set_profiling_enabled(True)
+        assert _utils._PROFILING_ENABLED is True
+
+    def test_maybe_record_function_returns_nullcontext_when_disabled(self, monkeypatch):
+        from torchrl import _utils
+
+        monkeypatch.setattr(_utils, "_PROFILING_ENABLED", False)
+        ctx = _utils._maybe_record_function("test")
+        assert ctx is _utils._NULL_CONTEXT
+
+    def test_as_remote_propagates_torchrl_profiling(self, monkeypatch):
+        # Mock the ray module so we can capture what `ray.remote` was called with.
+        ray_mock = mock.MagicMock()
+        captured = {}
+
+        def fake_remote(**kwargs):
+            captured.update(kwargs)
+            return lambda cls: cls
+
+        ray_mock.remote = fake_remote
+        monkeypatch.setitem(sys.modules, "ray", ray_mock)
+        monkeypatch.setenv("TORCHRL_PROFILING", "1")
+
+        from torchrl._utils import as_remote
+
+        class Dummy:
+            pass
+
+        as_remote.__func__(Dummy, remote_config={"num_cpus": 1})
+        env_vars = captured["runtime_env"]["env_vars"]
+        assert env_vars["TORCHRL_PROFILING"] == "1"
+        assert captured["num_cpus"] == 1
+
+    def test_as_remote_no_op_when_torchrl_profiling_unset(self, monkeypatch):
+        ray_mock = mock.MagicMock()
+        captured = {}
+
+        def fake_remote(**kwargs):
+            captured.update(kwargs)
+            return lambda cls: cls
+
+        ray_mock.remote = fake_remote
+        monkeypatch.setitem(sys.modules, "ray", ray_mock)
+        monkeypatch.delenv("TORCHRL_PROFILING", raising=False)
+
+        from torchrl._utils import as_remote
+
+        class Dummy:
+            pass
+
+        as_remote.__func__(Dummy, remote_config={"num_cpus": 1})
+        assert "runtime_env" not in captured
 
 
 if __name__ == "__main__":

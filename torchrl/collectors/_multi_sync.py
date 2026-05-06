@@ -14,6 +14,7 @@ from tensordict.nn import TensorDictModuleBase
 from torchrl import logger as torchrl_logger
 from torchrl._utils import (
     _check_for_faulty_process,
+    _maybe_record_function_decorator,
     accept_remote_rref_udf_invocation,
     RL_WARNINGS,
 )
@@ -176,6 +177,7 @@ class MultiSyncCollector(MultiCollector):
         return super().load_state_dict(state_dict)
 
     # for RPC
+    @_maybe_record_function_decorator("MultiSyncCollector.update_policy_weights_")
     def update_policy_weights_(
         self,
         policy_or_weights: TensorDictBase | TensorDictModuleBase | dict | None = None,
@@ -298,7 +300,7 @@ class MultiSyncCollector(MultiCollector):
                     if cat_results != "stack":
                         buffers = [None] * self.num_workers
                         for worker_idx, buffer in enumerate(self.buffers):
-                            # Skip pre-empted envs:
+                            # Skip preempted envs:
                             if buffer is None:
                                 continue
                             valid = buffer.get(("collector", "traj_ids")) != -1
@@ -362,6 +364,19 @@ class MultiSyncCollector(MultiCollector):
                     else:
                         same_device = same_device and (item.device == prev_device)
 
+            if self.split_trajs:
+                max_traj_id = -1
+                for idx in range(self.num_workers):
+                    if buffers[idx] is not None:
+                        traj_ids = buffers[idx].get(("collector", "traj_ids"))
+                        if traj_ids is not None:
+                            buffers[idx].set_(
+                                ("collector", "traj_ids"), traj_ids + max_traj_id + 1
+                            )
+                            max_traj_id = (
+                                buffers[idx].get(("collector", "traj_ids")).max()
+                            )
+
             if cat_results == "stack":
                 stack = (
                     torch.stack if self._use_buffers else TensorDict.maybe_dense_stack
@@ -415,19 +430,18 @@ class MultiSyncCollector(MultiCollector):
 
             self._frames += n_collected
 
-            if self.postprocs:
-                self.postprocs = (
-                    self.postprocs.to(out.device)
-                    if hasattr(self.postprocs, "to")
-                    else self.postprocs
+            if self.postproc:
+                self.postproc = (
+                    self.postproc.to(out.device)
+                    if hasattr(self.postproc, "to")
+                    else self.postproc
                 )
-                out = self.postprocs(out)
+                out = self.postproc(out)
             if self._exclude_private_keys:
                 excluded_keys = [key for key in out.keys() if key.startswith("_")]
                 if excluded_keys:
                     out = out.exclude(*excluded_keys)
             yield out
-            del out
 
         del self.buffers
         self.out_buffer = None

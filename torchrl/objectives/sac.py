@@ -38,7 +38,12 @@ from torchrl.objectives.utils import (
     distance_loss,
     ValueEstimators,
 )
-from torchrl.objectives.value import TD0Estimator, TD1Estimator, TDLambdaEstimator
+from torchrl.objectives.value import (
+    TD0Estimator,
+    TD1Estimator,
+    TDLambdaEstimator,
+    ValueEstimatorBase,
+)
 
 
 def _delezify(func):
@@ -68,12 +73,15 @@ class SACLoss(LossModule):
 
     Args:
         actor_network (ProbabilisticTensorDictSequential): stochastic actor
-        qvalue_network (TensorDictModule): Q(s, a) parametric model.
+        qvalue_network (TensorDictModule | list[TensorDictModule]): Q(s, a) parametric model.
             This module typically outputs a ``"state_action_value"`` entry.
             If a single instance of `qvalue_network` is provided, it will be duplicated ``num_qvalue_nets``
             times. If a list of modules is passed, their
             parameters will be stacked unless they share the same identity (in which case
             the original parameter will be expanded).
+            When a list is provided, the first module is used as the functional forward
+            reference (its ``in_keys``/``out_keys`` are used), so all modules must share
+            the same signature.
 
             .. warning:: When a list of parameters if passed, it will **not** be compared against the policy parameters
               and all the parameters will be considered as untied.
@@ -304,6 +312,9 @@ class SACLoss(LossModule):
     default_keys = _AcceptedKeys
     tensor_keys: _AcceptedKeys
     default_value_estimator = ValueEstimators.TD0
+    _schedulable_buffers = frozenset(
+        {"alpha_init", "min_log_alpha", "max_log_alpha", "log_alpha"}
+    )
 
     actor_network: TensorDictModule
     qvalue_network: TensorDictModule
@@ -339,6 +350,7 @@ class SACLoss(LossModule):
         skip_done_states: bool = False,
         deactivate_vmap: bool = False,
         use_prioritized_weights: str | bool = "auto",
+        scalar_output_mode: str | None = None,
     ) -> None:
         self._in_keys = None
         self._out_keys = None
@@ -442,6 +454,22 @@ class SACLoss(LossModule):
         self._make_vmap()
         self.reduction = reduction
         self.skip_done_states = skip_done_states
+
+        # Handle scalar_output_mode for reduction="none"
+        if reduction == "none" and scalar_output_mode is None:
+            warnings.warn(
+                "SACLoss with reduction='none' cannot include scalar values (alpha, entropy) "
+                "in the output TensorDict without changing their shape. These values will be "
+                "excluded from the output. You can access them via `loss_module._alpha` and "
+                "compute entropy from the log_prob in the actor loss metadata. "
+                "To suppress this warning, pass `scalar_output_mode='exclude'` to the constructor. "
+                "Alternatively, pass `scalar_output_mode='non_tensor'` to include them as non-tensor data. "
+                "This is a known limitation we're working on improving.",
+                category=UserWarning,
+                stacklevel=2,
+            )
+            scalar_output_mode = "exclude"
+        self.scalar_output_mode = scalar_output_mode
 
         log_prob_keys = getattr(self.actor_network, "log_prob_keys", [])
         action_keys = getattr(self.actor_network, "dist_sample_keys", [])
@@ -557,6 +585,13 @@ class SACLoss(LossModule):
     def make_value_estimator(self, value_type: ValueEstimators = None, **hyperparams):
         if value_type is None:
             value_type = self.default_value_estimator
+
+        # Handle ValueEstimatorBase instance or class
+        if isinstance(value_type, ValueEstimatorBase) or (
+            isinstance(value_type, type) and issubclass(value_type, ValueEstimatorBase)
+        ):
+            return LossModule.make_value_estimator(self, value_type, **hyperparams)
+
         self.value_type = value_type
         if self._version == 1:
             value_net = self.actor_critic
@@ -668,16 +703,30 @@ class SACLoss(LossModule):
                 f"Losses shape mismatch: {loss_actor.shape}, {loss_qvalue.shape} and {loss_value.shape}"
             )
         entropy = -metadata_actor["log_prob"]
+        # Build output dict with losses
         out = {
             "loss_actor": loss_actor,
             "loss_qvalue": loss_qvalue,
             "loss_alpha": loss_alpha,
-            "alpha": self._alpha,
-            "entropy": entropy.detach().mean(),
         }
         if self._version == 1:
             out["loss_value"] = loss_value
-        td_out = TensorDict(out)
+
+        # Handle batch_size and scalar values (alpha, entropy) based on reduction mode
+        if self.reduction == "none":
+            batch_size = tensordict.batch_size
+            # Create TensorDict with losses only
+            td_out = TensorDict(out, batch_size=batch_size)
+            if self.scalar_output_mode == "non_tensor":
+                # Include scalars as non-tensor data
+                td_out.set_non_tensor("alpha", self._alpha)
+                td_out.set_non_tensor("entropy", entropy.detach().mean())
+            # else "exclude": scalars are not included (warning was raised in __init__)
+        else:
+            batch_size = []
+            out["alpha"] = self._alpha
+            out["entropy"] = entropy.detach().mean()
+            td_out = TensorDict(out, batch_size=batch_size)
         self._clear_weakrefs(
             tensordict,
             td_out,
@@ -1131,6 +1180,9 @@ class DiscreteSACLoss(LossModule):
     tensor_keys: _AcceptedKeys
     default_keys = _AcceptedKeys
     default_value_estimator = ValueEstimators.TD0
+    _schedulable_buffers = frozenset(
+        {"alpha_init", "min_log_alpha", "max_log_alpha", "log_alpha"}
+    )
     delay_actor: bool = False
     out_keys = [
         "loss_actor",
@@ -1172,6 +1224,7 @@ class DiscreteSACLoss(LossModule):
         skip_done_states: bool = False,
         deactivate_vmap: bool = False,
         use_prioritized_weights: str | bool = "auto",
+        scalar_output_mode: str | None = None,
     ):
         if reduction is None:
             reduction = "mean"
@@ -1258,6 +1311,22 @@ class DiscreteSACLoss(LossModule):
         self.reduction = reduction
         self.skip_done_states = skip_done_states
 
+        # Handle scalar_output_mode for reduction="none"
+        if reduction == "none" and scalar_output_mode is None:
+            warnings.warn(
+                "DiscreteSACLoss with reduction='none' cannot include scalar values (alpha, entropy) "
+                "in the output TensorDict without changing their shape. These values will be "
+                "excluded from the output. You can access them via `loss_module._alpha` and "
+                "compute entropy from the log_prob in the actor loss metadata. "
+                "To suppress this warning, pass `scalar_output_mode='exclude'` to the constructor. "
+                "Alternatively, pass `scalar_output_mode='non_tensor'` to include them as non-tensor data. "
+                "This is a known limitation we're working on improving.",
+                category=UserWarning,
+                stacklevel=2,
+            )
+            scalar_output_mode = "exclude"
+        self.scalar_output_mode = scalar_output_mode
+
     def _make_vmap(self):
         self._vmap_qnetworkN0 = _vmap_func(
             self.qvalue_network,
@@ -1314,14 +1383,29 @@ class DiscreteSACLoss(LossModule):
                 f"Losses shape mismatch: {loss_actor.shape}, and {loss_qvalue.shape}"
             )
         entropy = -metadata_actor["log_prob"]
+        # Build output dict with losses
         out = {
             "loss_actor": loss_actor,
             "loss_qvalue": loss_qvalue,
             "loss_alpha": loss_alpha,
-            "alpha": self._alpha,
-            "entropy": entropy.detach().mean(),
         }
-        td_out = TensorDict(out, [])
+
+        # Handle batch_size and scalar values (alpha, entropy) based on reduction mode
+        if self.reduction == "none":
+            batch_size = tensordict.batch_size
+            # Create TensorDict with losses only
+            td_out = TensorDict(out, batch_size=batch_size)
+            if self.scalar_output_mode == "non_tensor":
+                # Include scalars as non-tensor data
+                td_out.set_non_tensor("alpha", self._alpha)
+                td_out.set_non_tensor("entropy", entropy.detach().mean())
+            # else "exclude": scalars are not included (warning was raised in __init__)
+        else:
+            batch_size = []
+            out["alpha"] = self._alpha
+            out["entropy"] = entropy.detach().mean()
+            td_out = TensorDict(out, batch_size=batch_size)
+
         self._clear_weakrefs(
             tensordict,
             td_out,
@@ -1521,6 +1605,13 @@ class DiscreteSACLoss(LossModule):
     def make_value_estimator(self, value_type: ValueEstimators = None, **hyperparams):
         if value_type is None:
             value_type = self.default_value_estimator
+
+        # Handle ValueEstimatorBase instance or class
+        if isinstance(value_type, ValueEstimatorBase) or (
+            isinstance(value_type, type) and issubclass(value_type, ValueEstimatorBase)
+        ):
+            return LossModule.make_value_estimator(self, value_type, **hyperparams)
+
         self.value_type = value_type
         hp = dict(default_value_kwargs(value_type))
         hp.update(hyperparams)

@@ -74,22 +74,12 @@ import tempfile
 import warnings
 
 warnings.filterwarnings("ignore")
+# Set multiprocessing start method to fork if not already set
+# This allows the tutorial to run as a script without if __name__ == "__main__"
 from torch import multiprocessing
 
-# TorchRL prefers spawn method, that restricts creation of  ``~torchrl.envs.ParallelEnv`` inside
-# `__main__` method call, but for the easy of reading the code switch to fork
-# which is also a default spawn method in Google's Colaboratory
-try:
-    is_sphinx = __sphinx_build__
-except NameError:
-    is_sphinx = False
-
-try:
-    multiprocessing.set_start_method(
-        "spawn" if is_sphinx else "fork", force=not is_sphinx
-    )
-except RuntimeError:
-    pass
+if multiprocessing.get_start_method(allow_none=True) is None:
+    multiprocessing.set_start_method("fork")
 
 # sphinx_gallery_end_ignore
 
@@ -101,7 +91,7 @@ from tensordict.nn import (
     TensorDictSequential as Seq,
 )
 from torch import nn
-from torchrl.collectors import SyncDataCollector
+from torchrl.collectors import Collector
 from torchrl.data import LazyMemmapStorage, TensorDictReplayBuffer
 from torchrl.data.replay_buffers.samplers import SliceSampler
 from torchrl.envs import (
@@ -332,7 +322,7 @@ policy = Seq(feature, lstm, mlp, qval)
 # (see training loop below).
 #
 exploration_module = EGreedyModule(
-    annealing_num_steps=1_000_000, spec=env.action_spec, eps_init=0.2
+    annealing_num_steps=1_000_000, spec=env.action_spec, eps_init=0.2, device=device
 )
 stoch_policy = TensorDictSequential(
     policy,
@@ -399,6 +389,12 @@ optim = torch.optim.Adam(policy.parameters(), lr=3e-4)
 # on disk, and pass the replay buffer directly to the data collector so it can
 # automatically populate the buffer as data is collected.
 #
+# .. seealso::
+#   The :ref:`collector trajectory assembly tutorial <collector_trajectory_assembly>`
+#   explains how ``split_trajectories``, ``trajs_per_batch``, and
+#   ``SliceSampler`` work together in detail, including asynchronous
+#   collection with :meth:`~torchrl.collectors.Collector.start`.
+#
 # .. note::
 #   For the sake of efficiency, we're only running a few thousands iterations
 #   here. In a real setting, the total number of frames should be set to 1M.
@@ -415,7 +411,7 @@ rb = TensorDictReplayBuffer(
     transform=lambda td: td.to(device),
 )
 
-collector = SyncDataCollector(
+collector = Collector(
     env,
     stoch_policy,
     frames_per_batch=50,

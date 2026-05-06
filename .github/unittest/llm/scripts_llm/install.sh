@@ -65,8 +65,8 @@ python -c "import torchrl"
 # Install MCP dependencies for tool execution tests
 printf "* Installing MCP dependencies (uvx, Deno)\n"
 
-# Install uvx (universal package runner)
-pip install uvx
+# Install uv (provides uvx command)
+pip install uv
 
 # Install Deno (required by mcp-run-python)
 curl -fsSL https://deno.land/install.sh | sh
@@ -75,3 +75,10 @@ export PATH="$HOME/.deno/bin:$PATH"
 # Verify installations
 uvx --version || echo "Warning: uvx not installed"
 deno --version || echo "Warning: Deno not installed"
+
+# Pre-download models for LLM tests to avoid timeout during test execution
+printf "* Pre-downloading models for LLM tests\n"
+python -c "from transformers import AutoTokenizer, AutoModelForCausalLM; AutoTokenizer.from_pretrained('Qwen/Qwen2.5-0.5B'); AutoModelForCausalLM.from_pretrained('Qwen/Qwen2.5-0.5B')"
+
+# Note: SGLang tests are run in a separate workflow (test-linux-llm-sglang.yml)
+# due to Triton version conflicts between vLLM and SGLang.

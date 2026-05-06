@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from numbers import Number
 
@@ -26,7 +27,12 @@ from torchrl.objectives.utils import (
     distance_loss,
     ValueEstimators,
 )
-from torchrl.objectives.value import TD0Estimator, TD1Estimator, TDLambdaEstimator
+from torchrl.objectives.value import (
+    TD0Estimator,
+    TD1Estimator,
+    TDLambdaEstimator,
+    ValueEstimatorBase,
+)
 
 
 class REDQLoss(LossModule):
@@ -244,6 +250,9 @@ class REDQLoss(LossModule):
     default_keys = _AcceptedKeys
     delay_actor: bool = False
     default_value_estimator = ValueEstimators.TD0
+    _schedulable_buffers = frozenset(
+        {"alpha_init", "min_log_alpha", "max_log_alpha", "log_alpha"}
+    )
     out_keys = [
         "loss_actor",
         "loss_qvalue",
@@ -284,6 +293,7 @@ class REDQLoss(LossModule):
         separate_losses: bool = False,
         reduction: str | None = None,
         deactivate_vmap: bool = False,
+        scalar_output_mode: str | None = None,
     ):
         if reduction is None:
             reduction = "mean"
@@ -352,6 +362,23 @@ class REDQLoss(LossModule):
         self.gSDE = gSDE
         if gamma is not None:
             raise TypeError(_GAMMA_LMBDA_DEPREC_ERROR)
+
+        # Handle scalar_output_mode for reduction="none"
+        if reduction == "none" and scalar_output_mode is None:
+            warnings.warn(
+                "REDQLoss with reduction='none' cannot include scalar values (alpha, entropy) "
+                "in the output TensorDict without changing their shape. These values will be "
+                "excluded from the output. You can access alpha via `loss_module.alpha` and "
+                "compute entropy from the sample log_prob. "
+                "To suppress this warning, pass `scalar_output_mode='exclude'` to the constructor. "
+                "Alternatively, pass `scalar_output_mode='non_tensor'` to include them as non-tensor data. "
+                "This is a known limitation we're working on improving.",
+                category=UserWarning,
+                stacklevel=2,
+            )
+            scalar_output_mode = "exclude"
+        self.scalar_output_mode = scalar_output_mode
+
         self._make_vmap()
 
     def _make_vmap(self):
@@ -588,8 +615,21 @@ class REDQLoss(LossModule):
             raise RuntimeError(
                 f"QVal and actor loss have different shape: {loss_qval.shape} and {loss_actor.shape}"
             )
-        td_out = TensorDict(
-            {
+        # Handle scalar values (alpha, entropy) based on reduction mode
+        if self.reduction == "none" and self.scalar_output_mode != "non_tensor":
+            # Exclude scalars when reduction="none" (they don't match the batch shape)
+            out = {
+                "loss_actor": loss_actor,
+                "loss_qvalue": loss_qval,
+                "loss_alpha": loss_alpha,
+                "state_action_value_actor": state_action_value_actor.detach(),
+                "action_log_prob_actor": action_log_prob_actor.detach(),
+                "next.state_value": next_state_value.detach(),
+                "target_value": target_value.detach(),
+            }
+            td_out = TensorDict(out, [])
+        else:
+            out = {
                 "loss_actor": loss_actor,
                 "loss_qvalue": loss_qval,
                 "loss_alpha": loss_alpha,
@@ -599,14 +639,18 @@ class REDQLoss(LossModule):
                 "action_log_prob_actor": action_log_prob_actor.detach(),
                 "next.state_value": next_state_value.detach(),
                 "target_value": target_value.detach(),
-            },
-            [],
-        )
-        td_out = td_out.named_apply(
-            lambda name, value: _reduce(value, reduction=self.reduction)
-            if name.startswith("loss_")
-            else value,
-        )
+            }
+            td_out = TensorDict(out, [])
+            if self.reduction != "none":
+                td_out = td_out.named_apply(
+                    lambda name, value: _reduce(value, reduction=self.reduction)
+                    if name.startswith("loss_")
+                    else value,
+                )
+            elif self.scalar_output_mode == "non_tensor":
+                # Move scalars to non-tensor after creation
+                td_out.set_non_tensor("alpha", td_out.pop("alpha"))
+                td_out.set_non_tensor("entropy", td_out.pop("entropy"))
         self._clear_weakrefs(
             tensordict,
             td_out,
@@ -643,6 +687,13 @@ class REDQLoss(LossModule):
     def make_value_estimator(self, value_type: ValueEstimators = None, **hyperparams):
         if value_type is None:
             value_type = self.default_value_estimator
+
+        # Handle ValueEstimatorBase instance or class
+        if isinstance(value_type, ValueEstimatorBase) or (
+            isinstance(value_type, type) and issubclass(value_type, ValueEstimatorBase)
+        ):
+            return LossModule.make_value_estimator(self, value_type, **hyperparams)
+
         self.value_type = value_type
         hp = dict(default_value_kwargs(value_type))
         if hasattr(self, "gamma"):

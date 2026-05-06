@@ -11,11 +11,12 @@ on:
       - v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
   # Documentation suggests ${{ github.head_ref }}, but that's only available on pull_request/pull_request_target triggers, so using ${{ github.ref }}.
   # On master, we want all builds to complete even if merging happens faster to make it easier to discover at which point something broke.
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && format('ci-master-{0}', github.sha) || format('ci-{0}', github.ref) }}
+  group: docs-${{ github.ref == 'refs/heads/main' && format('ci-master-{0}', github.sha) || format('ci-{0}', github.ref) }}
   cancel-in-progress: true
 
 permissions:
@@ -43,7 +44,9 @@ jobs:
         # Install system dependencies (Ubuntu-based PyTorch image)
         apt-get update
         apt-get install -y libglfw3 libglfw3-dev libgl1-mesa-glx libgl1-mesa-dev libegl1-mesa-dev \
-          freeglut3-dev libglu1-mesa libegl1 mesa-utils xvfb wget git cmake
+          freeglut3-dev libglu1-mesa libegl1 mesa-utils xvfb wget git cmake \
+          ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+          libavdevice-dev libavfilter-dev libswresample-dev pkg-config
         
         # 2. upgrade pip, ninja and packaging
         python -m pip install --upgrade pip
@@ -64,10 +67,18 @@ jobs:
           # Use stable PyTorch for releases (tags and release/* branches)
           python -m pip install torch torchvision --quiet --root-user-action=ignore
           python -m pip install tensordict --quiet --root-user-action=ignore
+          python -m pip install torchcodec --quiet --root-user-action=ignore
         else
           # Use nightly PyTorch for main, nightly, and PRs
           python -m pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cpu -U --quiet --root-user-action=ignore
           python -m pip install git+https://github.com/pytorch/tensordict.git --quiet --root-user-action=ignore
+          torchcodec_dir=$(mktemp -d)
+          git clone --depth 1 https://github.com/pytorch/torchcodec.git "$torchcodec_dir"
+          python_base="$(python -c 'import sys; print(sys.base_prefix)')"
+          CMAKE_PREFIX_PATH="${python_base}${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}" \
+            I_CONFIRM_THIS_IS_NOT_A_LICENSE_VIOLATION=1 \
+            python -m pip install --no-build-isolation "$torchcodec_dir" --quiet --root-user-action=ignore
+          rm -rf "$torchcodec_dir"
         fi
         
         # 6. Install doc requirements BEFORE TorchRL to ensure gymnasium is available
@@ -76,6 +87,13 @@ jobs:
         
         # 7. Install TorchRL
         python -m pip install -e . --no-build-isolation
+
+        # 8. Assert PyTorch version matches expectations
+        if [[ ${{ github.event_name }} == push && (${{ github.ref_type }} == tag || (${{ github.ref_type }} == branch && ${{ github.ref_name }} == release/*)) ]]; then
+          bash .github/unittest/helpers/assert_torch_version.sh stable
+        else
+          bash .github/unittest/helpers/assert_torch_version.sh nightly
+        fi
 
         # 9. Set sanitize version
         if [[ ${{ github.event_name }} == push && (${{ github.ref_type }} == tag || (${{ github.ref_type }} == branch && ${{ github.ref_name }} == release/*)) ]]; then

@@ -18,12 +18,14 @@ from torchrl import compile_with_warmup
 from torchrl._utils import (
     _ends_with,
     _make_ordinal_device,
+    _maybe_record_function,
+    _maybe_record_function_decorator,
     _replace_last,
     accept_remote_rref_udf_invocation,
     prod,
     RL_WARNINGS,
 )
-from torchrl.collectors._base import _LegacyCollectorMeta, BaseCollector, ProfileConfig
+from torchrl.collectors._base import _LegacyCollectorMeta, BaseCollector
 from torchrl.collectors._constants import (
     cudagraph_mark_step_begin,
     DEFAULT_EXPLORATION_TYPE,
@@ -41,122 +43,9 @@ from torchrl.envs.utils import (
     _make_compatible_policy,
     set_exploration_type,
 )
-from torchrl.modules import RandomPolicy
-from torchrl.modules.tensordict_module.exploration import (
-    set_exploration_modules_spec_from_env,
-)
-from torchrl.weight_update import WeightSyncScheme
+from torchrl.modules import RandomPolicy, set_exploration_modules_spec_from_env
 from torchrl.weight_update.utils import _resolve_model
-
-
-class _CollectorProfiler:
-    """Helper class for profiling collector rollouts in single-process mode.
-
-    Manages the PyTorch profiler lifecycle for the Collector class.
-    """
-
-    def __init__(self, profile_config: ProfileConfig):
-        self.config = profile_config
-        self.rollout_count = 0
-        self._profiler = None
-        self._stopped = False
-        self._active = False
-
-        # Set up profiler schedule
-        active_rollouts = self.config.num_rollouts - self.config.warmup_rollouts
-        profiler_schedule = torch.profiler.schedule(
-            skip_first=self.config.warmup_rollouts,
-            wait=0,
-            warmup=0,
-            active=active_rollouts,
-            repeat=1,
-        )
-
-        # Get activities
-        activities = self.config.get_activities()
-        if not activities:
-            return
-
-        # Determine trace handler
-        if self.config.on_trace_ready is not None:
-            on_trace_ready = self.config.on_trace_ready
-        else:
-            save_path = self.config.get_save_path(
-                0
-            )  # Use worker_idx 0 for single-process
-            save_path.parent.mkdir(parents=True, exist_ok=True)
-
-            from torchrl import logger as torchrl_logger
-
-            def on_trace_ready(prof, save_path=save_path):
-                prof.export_chrome_trace(str(save_path))
-                torchrl_logger.info(f"Collector: Profiling trace saved to {save_path}")
-
-        self._profiler = torch.profiler.profile(
-            activities=activities,
-            schedule=profiler_schedule,
-            on_trace_ready=on_trace_ready,
-            record_shapes=self.config.record_shapes,
-            profile_memory=self.config.profile_memory,
-            with_stack=self.config.with_stack,
-            with_flops=self.config.with_flops,
-        )
-        self._active = True
-
-    def start(self) -> None:
-        """Start the profiler."""
-        from torchrl import logger as torchrl_logger
-
-        if self._profiler is not None and not self._stopped:
-            self._profiler.start()
-            torchrl_logger.info(
-                f"Collector: Profiling started. "
-                f"Will profile rollouts {self.config.warmup_rollouts} to {self.config.num_rollouts - 1}."
-            )
-
-    def step(self) -> bool:
-        """Step the profiler after a rollout.
-
-        Returns:
-            True if profiling is complete.
-        """
-        if self._profiler is None or self._stopped:
-            return False
-
-        self.rollout_count += 1
-        self._profiler.step()
-
-        # Check if profiling is complete
-        if self.rollout_count >= self.config.num_rollouts:
-            self.stop()
-            return True
-
-        return False
-
-    def stop(self) -> None:
-        """Stop the profiler and export trace."""
-        from torchrl import logger as torchrl_logger
-
-        if self._profiler is not None and not self._stopped:
-            self._profiler.stop()
-            self._stopped = True
-            torchrl_logger.info(
-                f"Collector: Profiling complete after {self.rollout_count} rollouts."
-            )
-
-    @property
-    def is_active(self) -> bool:
-        """Check if profiling is active."""
-        return self._active and not self._stopped
-
-    @contextlib.contextmanager
-    def profile_rollout(self):
-        """Context manager for profiling a single rollout."""
-        if self._profiler is not None and not self._stopped:
-            with torch.profiler.record_function("collector_rollout"):
-                yield
-        else:
-            yield
+from torchrl.weight_update.weight_sync_schemes import WeightSyncScheme
 
 
 def _cuda_sync_if_initialized():
@@ -441,22 +330,29 @@ class Collector(BaseCollector):
         use_buffers: bool | None = None,
         replay_buffer: ReplayBuffer | None = None,
         extend_buffer: bool = True,
-        local_init_rb: bool | None = None,
         trust_policy: bool | None = None,
         compile_policy: bool | dict[str, Any] | None = None,
         cudagraph_policy: bool | dict[str, Any] | None = None,
         no_cuda_sync: bool = False,
-        weight_updater: WeightUpdaterBase
-        | Callable[[], WeightUpdaterBase]
-        | None = None,
+        weight_updater: (
+            WeightUpdaterBase | Callable[[], WeightUpdaterBase] | None
+        ) = None,
         weight_sync_schemes: dict[str, WeightSyncScheme] | None = None,
         weight_recv_schemes: dict[str, WeightSyncScheme] | None = None,
         track_policy_version: bool = False,
         worker_idx: int | None = None,
+        trajs_per_batch: int | None = None,
+        pre_collect_hook: Callable[[], None] | None = None,
+        post_collect_hook: Callable[[TensorDictBase], None] | None = None,
         **kwargs,
     ):
         self.closed = True
         self.worker_idx = worker_idx
+        self.trajs_per_batch = trajs_per_batch
+        super().__init__(
+            pre_collect_hook=pre_collect_hook,
+            post_collect_hook=post_collect_hook,
+        )
 
         # Note: weight_sync_schemes can be used to send weights to components
         # within the environment (e.g., RayModuleTransform), not just sub-collectors
@@ -494,7 +390,6 @@ class Collector(BaseCollector):
         self._setup_replay_buffer(
             replay_buffer=replay_buffer,
             extend_buffer=extend_buffer,
-            local_init_rb=local_init_rb,
             postproc=postproc,
             split_trajs=split_trajs,
             return_same_td=return_same_td,
@@ -517,9 +412,6 @@ class Collector(BaseCollector):
 
         # Set up policy and weights
         self._setup_policy_and_weights(policy)
-
-        # Configure exploration modules with action_spec from environment
-        set_exploration_modules_spec_from_env(self.policy, self.env)
 
         # Apply environment device
         self._apply_env_device()
@@ -610,6 +502,12 @@ class Collector(BaseCollector):
         elif policy_factory is not None:
             raise TypeError("policy_factory cannot be used with policy argument.")
 
+        # Lazily initialize a RandomPolicy that was constructed without an
+        # action_spec (supports both `policy=RandomPolicy()` and a
+        # `policy_factory` that returns one).
+        if isinstance(policy, RandomPolicy):
+            policy.set_action_spec_from_env(env)
+
         if trust_policy is None:
             trust_policy = isinstance(policy, (RandomPolicy, CudaGraphModule))
         self.trust_policy = trust_policy
@@ -692,7 +590,6 @@ class Collector(BaseCollector):
         self,
         replay_buffer: ReplayBuffer | None,
         extend_buffer: bool,
-        local_init_rb: bool | None,
         postproc: Callable | None,
         split_trajs: bool | None,
         return_same_td: bool,
@@ -701,17 +598,7 @@ class Collector(BaseCollector):
         """Set up replay buffer configuration and validate compatibility."""
         self.replay_buffer = replay_buffer
         self.extend_buffer = extend_buffer
-
-        # Handle local_init_rb deprecation
-        if local_init_rb is None:
-            local_init_rb = False
-            if replay_buffer is not None and not local_init_rb:
-                warnings.warn(
-                    "local_init_rb=False is deprecated and will be removed in v0.12. "
-                    "The new storage-level initialization provides better performance.",
-                    FutureWarning,
-                )
-        self.local_init_rb = local_init_rb
+        self.local_init_rb = True
 
         # Validate replay buffer compatibility
         if self.replay_buffer is not None and not self._ignore_rb:
@@ -773,6 +660,10 @@ class Collector(BaseCollector):
             else:
                 self.policy = self._wrapped_policy = policy
 
+            # Auto-configure exploration modules if needed (e.g. spec=None)
+            if isinstance(self.policy, nn.Module):
+                set_exploration_modules_spec_from_env(self.policy, self.env)
+
             # For meta-parameter policies, keep the internal (worker-side) policy
             # as the reference for collector state_dict / load_state_dict.
             if isinstance(self.policy, nn.Module):
@@ -801,6 +692,10 @@ class Collector(BaseCollector):
                 self._wrapped_policy = wrapped_policy
             else:
                 self.policy = self._wrapped_policy = policy
+
+            # Auto-configure exploration modules if needed (e.g. spec=None)
+            if isinstance(self.policy, nn.Module):
+                set_exploration_modules_spec_from_env(self.policy, self.env)
 
             # Use the internal, unwrapped policy (cast to the correct device) as the
             # reference for state_dict / load_state_dict and legacy weight extractors.
@@ -1096,9 +991,11 @@ class Collector(BaseCollector):
         elif (
             not make_rollout
             and hasattr(
-                self._wrapped_policy_uncompiled
-                if has_meta_params
-                else self._wrapped_policy,
+                (
+                    self._wrapped_policy_uncompiled
+                    if has_meta_params
+                    else self._wrapped_policy
+                ),
                 "out_keys",
             )
             and (
@@ -1257,6 +1154,7 @@ class Collector(BaseCollector):
         return super().next()
 
     # for RPC
+    @_maybe_record_function_decorator("Collector.update_policy_weights_")
     def update_policy_weights_(
         self,
         policy_or_weights: TensorDictBase | TensorDictModuleBase | dict | None = None,
@@ -1379,13 +1277,6 @@ class Collector(BaseCollector):
             streams = []
             events = []
 
-        # Set up profiler if configured
-        profiler = None
-        if self._profile_config is not None:
-            profiler = _CollectorProfiler(self._profile_config)
-            if profiler.is_active:
-                profiler.start()
-
         with contextlib.ExitStack() as stack:
             for stream in streams:
                 stack.enter_context(torch.cuda.stream(stream))
@@ -1393,19 +1284,7 @@ class Collector(BaseCollector):
             while self._frames < self.total_frames:
                 self._iter += 1
 
-                # Use profiler context if profiling is active
-                profile_ctx = (
-                    profiler.profile_rollout()
-                    if profiler is not None and profiler.is_active
-                    else contextlib.nullcontext()
-                )
-
-                with profile_ctx:
-                    tensordict_out = self.rollout()
-
-                # Step the profiler after each rollout
-                if profiler is not None and profiler.is_active:
-                    profiler.step()
+                tensordict_out = self.rollout()
 
                 if tensordict_out is None:
                     # if a replay buffer is passed and self.extend_buffer=False, there is no tensordict_out
@@ -1421,6 +1300,8 @@ class Collector(BaseCollector):
                         for event in events:
                             event.record()
                             event.synchronize()
+                    if self.post_collect_hook is not None:
+                        self.post_collect_hook(tensordict_out)
                     yield tensordict_out
                 elif self.replay_buffer is not None and not self._ignore_rb:
                     self.replay_buffer.extend(tensordict_out)
@@ -1436,11 +1317,10 @@ class Collector(BaseCollector):
                     # >>>      else:
                     # >>>          break
                     # >>> assert data0["done"] is not data1["done"]
-                    yield tensordict_out.clone()
-
-        # Stop profiler if it hasn't been stopped yet
-        if profiler is not None and profiler.is_active:
-            profiler.stop()
+                    tensordict_out = tensordict_out.clone()
+                    if self.post_collect_hook is not None:
+                        self.post_collect_hook(tensordict_out)
+                    yield tensordict_out
 
     def start(self):
         """Starts the collector in a separate thread for asynchronous data collection.
@@ -1592,10 +1472,16 @@ class Collector(BaseCollector):
             new_traj = pool.get_traj_and_increment(
                 traj_sop.sum(), device=traj_sop.device
             )
-            traj_ids = traj_ids.masked_scatter(traj_sop, new_traj)
+            # masked_scatter on MPS may incorrectly change the shape from [] to [1],
+            # so we preserve the original shape and reshape after the operation.
+            original_shape = traj_ids.shape
+            traj_ids = traj_ids.masked_scatter(traj_sop, new_traj).reshape(
+                original_shape
+            )
             self._carrier.set(("collector", "traj_ids"), traj_ids)
 
     @torch.no_grad()
+    @_maybe_record_function_decorator("Collector.rollout")
     def rollout(self) -> TensorDictBase:
         """Computes a rollout in the environment using the provided policy.
 
@@ -1603,6 +1489,9 @@ class Collector(BaseCollector):
             TensorDictBase containing the computed rollout.
 
         """
+        if self.pre_collect_hook is not None:
+            self.pre_collect_hook()
+
         if self.reset_at_each_iter:
             self._carrier.update(self.env.reset())
 
@@ -1622,11 +1511,11 @@ class Collector(BaseCollector):
                     ):
                         # TODO: This may break with exclusive / ragged lazy stacks
                         self._carrier.apply(
-                            lambda name, val: val.to(
-                                device=self.policy_device, non_blocking=True
-                            )
-                            if name in self._policy_output_keys
-                            else val,
+                            lambda name, val: (
+                                val.to(device=self.policy_device, non_blocking=True)
+                                if name in self._policy_output_keys
+                                else val
+                            ),
                             out=self._carrier,
                             named=True,
                             nested_keys=True,
@@ -1655,7 +1544,8 @@ class Collector(BaseCollector):
                     # we still do the assignment for security
                     if self.compiled_policy:
                         cudagraph_mark_step_begin()
-                    policy_output = self._wrapped_policy(policy_input)
+                    with _maybe_record_function("Collector.policy"):
+                        policy_output = self._wrapped_policy(policy_input)
                     if self.compiled_policy:
                         policy_output = policy_output.clone()
                     if self._carrier is not policy_output:
@@ -1747,6 +1637,13 @@ class Collector(BaseCollector):
                                     self._final_rollout.ndim - 1,
                                     out=self._final_rollout[..., : t + 1],
                                 )
+                    elif (
+                        self.replay_buffer is not None
+                        and not self._ignore_rb
+                        and self.extend_buffer
+                    ):
+                        # Use lazy stack for direct storage write optimization
+                        result = LazyStackedTensorDict.lazy_stack(tensordicts, dim=-1)
                     else:
                         result = TensorDict.maybe_dense_stack(tensordicts, dim=-1)
                     break
@@ -1773,6 +1670,15 @@ class Collector(BaseCollector):
                     and not self.extend_buffer
                 ):
                     return
+                elif (
+                    self.replay_buffer is not None
+                    and not self._ignore_rb
+                    and self.extend_buffer
+                ):
+                    # Use lazy stack for direct storage write optimization.
+                    # This avoids creating an intermediate contiguous copy -
+                    # the storage will stack directly into its buffer.
+                    result = LazyStackedTensorDict.lazy_stack(tensordicts, dim=-1)
                 else:
                     result = TensorDict.maybe_dense_stack(tensordicts, dim=-1)
                     result.refine_names(..., "time")
@@ -1836,6 +1742,11 @@ class Collector(BaseCollector):
         """
         try:
             if not self.closed:
+                # Stop the background thread if one is running (from .start())
+                # before tearing down the env it may still be using.
+                self._stop = True
+                if hasattr(self, "_thread") and self._thread.is_alive():
+                    self._thread.join(timeout=timeout)
                 self.closed = True
                 del self._carrier
                 if self._use_buffers:

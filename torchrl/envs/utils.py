@@ -771,12 +771,27 @@ def check_env_specs(
         fake_tensordict = LazyStackedTensorDict.lazy_stack(
             [fake_tensordict.clone() for _ in range(3)], -1
         )
-    # eliminate empty containers
+    # state_spec keys may optionally appear in "next" if _step returns them,
+    # so exclude them from all comparisons to avoid false positives in either
+    # direction (real has them but fake doesn't, or vice versa).
+    state_spec_next_keys = {
+        ("next", *k) if isinstance(k, tuple) else ("next", k)
+        for k in env.state_spec.keys(True, True)
+    }
+    # eliminate empty containers, excluding state_spec keys from "next"
     fake_tensordict_select = fake_tensordict.select(
-        *fake_tensordict.keys(True, True, is_leaf=_default_is_leaf)
+        *[
+            k
+            for k in fake_tensordict.keys(True, True, is_leaf=_default_is_leaf)
+            if k not in state_spec_next_keys
+        ]
     )
     real_tensordict_select = real_tensordict.select(
-        *real_tensordict.keys(True, True, is_leaf=_default_is_leaf)
+        *[
+            k
+            for k in real_tensordict.keys(True, True, is_leaf=_default_is_leaf)
+            if k not in state_spec_next_keys
+        ]
     )
     # check keys
     fake_tensordict_keys = set(
@@ -785,6 +800,8 @@ def check_env_specs(
     real_tensordict_keys = set(
         real_tensordict.keys(True, True, is_leaf=_is_leaf_nontensor)
     )
+    fake_tensordict_keys -= state_spec_next_keys
+    real_tensordict_keys -= state_spec_next_keys
     if fake_tensordict_keys != real_tensordict_keys:
         keys_in_real_not_in_fake = real_tensordict_keys - fake_tensordict_keys
         keys_in_fake_not_in_real = fake_tensordict_keys - real_tensordict_keys
@@ -1006,7 +1023,7 @@ class MarlGroupMapType(Enum):
 
     As a feature of torchrl multiagent, you are able to control the grouping of agents in your environment.
     You can group agents together (stacking their tensors) to leverage vectorization when passing them through the same
-    neural network. You can split agents in different groups where they are heterogenous or should be processed by
+    neural network. You can split agents in different groups where they are heterogeneous or should be processed by
     different neural networks. To group, you just need to pass a ``group_map`` at env constructiuon time.
 
     Otherwise, you can choose one of the premade grouping strategies from this class.

@@ -38,6 +38,7 @@ from torchrl.data import (
     LazyTensorStorage,
     RandomSampler,
     RayReplayBuffer,
+    ReplayBuffer,
     RoundRobinWriter,
     SamplerWithoutReplacement,
 )
@@ -449,6 +450,65 @@ class DistributedCollectorBase:
                 proc.terminate()
             queue.close()
 
+    @classmethod
+    def _test_collector_next_method(cls, queue):
+        """Non-regression test for iterator/flag bug.
+
+        Previously, `__iter__` set `_iterator = True` as a flag, but `next()` expected
+        `_iterator` to be either `None` or an actual iterator object. When Ray's remote
+        collector called `next()` after `__iter__`, it tried `next(True)` which failed
+        with `TypeError: 'bool' object is not an iterator`.
+
+        This test ensures that calling `next()` works correctly regardless of whether
+        `__iter__` has been called.
+        """
+        try:
+            cls._start_worker()
+            env = ContinuousActionVecMockEnv
+            policy = RandomPolicy(env().action_spec)
+            collector = cls.distributed_class()(
+                [env] * 2,
+                policy,
+                total_frames=500,
+                frames_per_batch=50,
+                **cls.distributed_kwargs(),
+            )
+
+            # Test 1: Call next() directly without __iter__
+            data1 = collector.next()
+            assert data1 is not None, "next() should return data"
+            assert data1.numel() == 50, f"Expected 50 frames, got {data1.numel()}"
+
+            # Test 2: Call next() again
+            data2 = collector.next()
+            assert data2 is not None, "second next() should return data"
+            assert data2.numel() == 50, f"Expected 50 frames, got {data2.numel()}"
+
+            queue.put(("passed", None))
+        except Exception as e:
+            tb = traceback.format_exc()
+            queue.put(("not passed", (e, tb)))
+        finally:
+            collector.shutdown()
+
+    def test_collector_next_method(self):
+        """Non-regression test: next() should work correctly (iterator/flag bug fix)."""
+        queue = mp.Queue(1)
+        proc = mp.Process(
+            target=self._test_collector_next_method,
+            args=(queue,),
+        )
+        proc.start()
+        try:
+            out, maybe_err = queue.get(timeout=TIMEOUT)
+            if out != "passed":
+                raise RuntimeError(f"Error with stack {maybe_err[1]}") from maybe_err[0]
+        finally:
+            proc.join(10)
+            if proc.is_alive():
+                proc.terminate()
+            queue.close()
+
 
 class TestDistributedCollector(DistributedCollectorBase):
     @classmethod
@@ -839,8 +899,13 @@ class TestRayCollector(DistributedCollectorBase):
     )
     @pytest.mark.parametrize("writer", [None, partial(RoundRobinWriter)])
     def test_ray_replaybuffer(self, storage, sampler, writer):
+        torch.manual_seed(42)
         kwargs = self.distributed_kwargs()
         kwargs["remote_config"] = kwargs.pop("remote_configs")
+        kwargs["remote_config"]["num_gpus"] = 0
+        kwargs["remote_config"]["runtime_env"] = {
+            "env_vars": {"CUDA_VISIBLE_DEVICES": ""},
+        }
         rb = RayReplayBuffer(
             storage=storage,
             sampler=sampler,
@@ -848,13 +913,17 @@ class TestRayCollector(DistributedCollectorBase):
             batch_size=32,
             **kwargs,
         )
-        td = TensorDict(a=torch.arange(100, 200), batch_size=[100])
-        index = rb.extend(td)
-        assert (index == torch.arange(100)).all()
-        for _ in range(10):
-            sample = rb.sample()
-            if sampler is SamplerWithoutReplacement:
-                assert sample["a"].unique().numel() == sample.numel()
+        try:
+            td = TensorDict(a=torch.arange(100, 200), batch_size=[100])
+            index = rb.extend(td)
+            assert (index == torch.arange(100)).all()
+            assert len(rb) == 100
+            for _ in range(10):
+                sample = rb.sample()
+                if sampler is SamplerWithoutReplacement:
+                    assert sample["a"].unique().numel() == sample.numel()
+        finally:
+            rb.close()
 
     # class CustomCollectorCls(Collector):
     #     def __init__(self, create_env_fn, **kwargs):
@@ -904,6 +973,73 @@ class TestRayCollector(DistributedCollectorBase):
                 collector.update_policy_weights_(weights)
         finally:
             collector.shutdown()
+
+
+@pytest.mark.skipif(
+    not _has_ray, reason="Ray not found. Ray may be badly configured or not installed."
+)
+class TestRayTrajsPerBatch:
+    """Tests for trajs_per_batch + replay_buffer on RayCollector."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def start_ray(self):
+        import ray
+
+        ray.shutdown()
+        ray_init_config = dict(DEFAULT_RAY_INIT_CONFIG)
+        ray_init_config["runtime_env"] = {
+            "working_dir": os.path.dirname(__file__),
+            "env_vars": {"PYTHONPATH": os.path.dirname(__file__)},
+        }
+        ray.init(**ray_init_config)
+        yield
+        ray.shutdown()
+
+    @pytest.fixture(autouse=True, scope="function")
+    def reset_process_group(self):
+        import torch.distributed as dist
+
+        try:
+            dist.destroy_process_group()
+        except Exception:
+            pass
+        yield
+
+    def test_ray_trajs_per_batch_replay_buffer_rejects_regular_rb(self):
+        """RayCollector rejects a regular ReplayBuffer (must use RayReplayBuffer)."""
+        from torchrl.envs import StepCounter, TransformedEnv
+
+        max_steps = 4
+        num_trajs = 2
+
+        def env_fn():
+            return TransformedEnv(
+                CountingEnv(max_steps=max_steps), StepCounter(max_steps)
+            )
+
+        probe = env_fn()
+        policy = RandomPolicy(probe.action_spec)
+        probe.close(raise_if_closed=False)
+
+        rb = ReplayBuffer(storage=LazyTensorStorage(200))
+        ray_init_config = dict(DEFAULT_RAY_INIT_CONFIG)
+        ray_init_config["runtime_env"] = {
+            "working_dir": os.path.dirname(__file__),
+            "env_vars": {"PYTHONPATH": os.path.dirname(__file__)},
+        }
+        remote_configs = {"num_cpus": 1, "num_gpus": 0.0}
+        with pytest.raises(TypeError, match="RayReplayBuffer"):
+            RayCollector(
+                [env_fn, env_fn],
+                policy,
+                collector_class=Collector,
+                replay_buffer=rb,
+                frames_per_batch=max_steps * 4,
+                total_frames=max_steps * 16,
+                trajs_per_batch=num_trajs,
+                ray_init_config=ray_init_config,
+                remote_configs=remote_configs,
+            )
 
 
 if __name__ == "__main__":
