@@ -1,5 +1,5 @@
 {
-  "last_updated": "2026-07-17T07:59:17.153038+00:00",
+  "last_updated": "2026-07-17T18:59:41.030577+00:00",
   "stats": {
     "last_7_days": {
       "days": 7,
@@ -22,7 +22,7 @@
     {
       "date": "2026-07-17",
       "orchestrator_ran": true,
-      "orchestrator_status": "pending",
+      "orchestrator_status": "queued",
       "orchestrator_url": "https://github.com/raphaelschwinger/torchrl/actions/runs/29564811709",
       "orchestrator_run_id": 29564811709,
       "workflows": {
