@@ -1,36 +1,135 @@
 {
-  "last_updated": "2026-09-03T10:24:26.251452+00:00",
+  "last_updated": "2026-09-03T20:24:15.855987+00:00",
   "stats": {
     "last_7_days": {
       "days": 7,
-      "runs_with_data": 5,
-      "total_workflow_runs": 60,
-      "total_success": 45,
-      "total_failure": 1,
+      "runs_with_data": 6,
+      "total_workflow_runs": 72,
+      "total_success": 54,
+      "total_failure": 2,
       "success_rate": 75.0
     },
     "last_30_days": {
       "days": 30,
-      "runs_with_data": 27,
-      "total_workflow_runs": 324,
-      "total_success": 243,
-      "total_failure": 12,
+      "runs_with_data": 28,
+      "total_workflow_runs": 336,
+      "total_success": 252,
+      "total_failure": 13,
       "success_rate": 75.0
     }
   },
   "history": [
     {
       "date": "2026-09-03",
-      "orchestrator_ran": false,
-      "orchestrator_status": "not_run",
-      "orchestrator_url": null,
-      "workflows": {},
+      "orchestrator_ran": true,
+      "orchestrator_status": "queued",
+      "orchestrator_url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000",
+      "orchestrator_run_id": 33744765000,
+      "workflows": {
+        "test-linux.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614635033",
+          "display_name": "Linux Tests"
+        },
+        "test-linux-llm.yml": {
+          "status": "skipped",
+          "conclusion": "skipped",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614632597",
+          "display_name": "LLM Tests"
+        },
+        "test-linux-habitat.yml": {
+          "status": "skipped",
+          "conclusion": "skipped",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614632728",
+          "display_name": "Habitat Tests"
+        },
+        "test-linux-tutorials.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614634889",
+          "display_name": "Tutorials Tests"
+        },
+        "test-linux-sota.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614634940",
+          "display_name": "SOTA Tests"
+        },
+        "test-linux-libs.yml": {
+          "status": "skipped",
+          "conclusion": "skipped",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614632484",
+          "display_name": "Libs Tests"
+        },
+        "test-windows-optdepts.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614634873",
+          "display_name": "Windows Tests"
+        },
+        "lint.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614634541",
+          "display_name": "Lint"
+        },
+        "docs.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614635315",
+          "display_name": "Documentation"
+        },
+        "benchmarks.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614632445",
+          "display_name": "Benchmarks"
+        },
+        "validate-test-partitioning.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614632284",
+          "display_name": "Test Partitioning"
+        },
+        "nightly_build.yml": {
+          "status": "skipped",
+          "conclusion": "skipped",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614632558",
+          "display_name": "Nightly Build"
+        },
+        "build-wheels-linux.yml": {
+          "status": "failure",
+          "conclusion": "failure",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614634165",
+          "display_name": "Wheels (Linux)"
+        },
+        "build-wheels-m1.yml": {
+          "status": "success",
+          "conclusion": "success",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614634565",
+          "display_name": "Wheels (M1)"
+        },
+        "build-wheels-windows.yml": {
+          "status": "cancelled",
+          "conclusion": "cancelled",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614634830",
+          "display_name": "Wheels (Windows)"
+        },
+        "build-wheels-aarch64-linux.yml": {
+          "status": "cancelled",
+          "conclusion": "cancelled",
+          "url": "https://github.com/raphaelschwinger/torchrl/actions/runs/33744765000/job/100614634733",
+          "display_name": "Wheels (Aarch64)"
+        }
+      },
       "summary": {
-        "total": 0,
-        "success": 0,
-        "failure": 0,
-        "skipped": 0,
-        "success_rate": null
+        "total": 16,
+        "success": 9,
+        "failure": 1,
+        "skipped": 4,
+        "other": 2,
+        "success_rate": 75.0
       }
     },
     {
